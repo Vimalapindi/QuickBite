@@ -1,0 +1,18 @@
+# Infrastructure only, for local development (run the API/worker/frontend with npm on your machine):
+#   docker compose -f docker-compose.infra.yml up -d
+name: quickbite-infra
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: quickbite, POSTGRES_PASSWORD: quickbite_dev_password, POSTGRES_DB: quickbite }
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment: { RABBITMQ_DEFAULT_USER: quickbite, RABBITMQ_DEFAULT_PASS: quickbite_dev_password }
+    ports: ["5672:5672", "15672:15672"]
+volumes:
+  pgdata:

@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s      # short, so dashboards react quickly during a k6 run
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: quickbite-api
+    metrics_path: /metrics
+    static_configs: [{ targets: ["api:4000"] }]
+  - job_name: quickbite-worker
+    metrics_path: /metrics
+    static_configs: [{ targets: ["worker:4001"] }]
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]

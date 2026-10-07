@@ -1,0 +1,293 @@
+// QuickBite schema. Migrations live in prisma/migrations/*/migration.sql and are applied
+// by `npm run db:migrate` (scripts/migrate.ts). Some objects are SQL-only because Prisma
+// cannot express them: CHECK constraints, partial indexes, the pg_trgm extension and GIN indexes.
+
+generator client {
+  provider        = "prisma-client-js"
+  engineType      = "client"
+  previewFeatures = ["queryCompiler", "driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  RESTAURANT_OWNER
+  DELIVERY_PARTNER
+  ADMIN
+}
+
+enum OrderStatus {
+  PLACED
+  PAID
+  CONFIRMED
+  PREPARING
+  READY_FOR_PICKUP
+  PICKED_UP
+  DELIVERED
+  CANCELLED
+  REJECTED
+  PAYMENT_FAILED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum DeliveryStatus {
+  ASSIGNED
+  PICKED_UP
+  DELIVERED
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  name         String
+  phone        String?
+  role         Role     @default(CUSTOMER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  addresses     Address[]
+  restaurants   Restaurant[]
+  cart          Cart?
+  orders        Order[]
+  partnerProfile DeliveryPartnerProfile?
+  notifications Notification[]
+}
+
+model Address {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  label     String?
+  line1     String
+  city      String
+  pincode   String
+  lat       Float
+  lng       Float
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@index([userId])
+}
+
+model Restaurant {
+  id              String   @id @default(uuid()) @db.Uuid
+  ownerId         String   @db.Uuid
+  name            String
+  description     String?
+  cuisine         String
+  city            String
+  address         String
+  lat             Float
+  lng             Float
+  isOpen          Boolean  @default(true)
+  deliveryFeeCents Int     @default(4000)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  owner      User           @relation(fields: [ownerId], references: [id])
+  categories MenuCategory[]
+  items      MenuItem[]
+  orders     Order[]
+
+  @@index([city, isOpen])
+  @@index([cuisine])
+  @@index([ownerId])
+}
+
+model MenuCategory {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  sortOrder    Int    @default(0)
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  items      MenuItem[]
+
+  @@index([restaurantId])
+}
+
+model MenuItem {
+  id           String   @id @default(uuid()) @db.Uuid
+  restaurantId String   @db.Uuid
+  categoryId   String?  @db.Uuid
+  name         String
+  description  String?
+  priceCents   Int
+  isAvailable  Boolean  @default(true)
+  // null = unlimited. A number = tracked inventory, decremented atomically at order time.
+  stock        Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant    @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  category   MenuCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  cartItems  CartItem[]
+
+  @@index([restaurantId, isAvailable])
+  @@index([categoryId])
+}
+
+model Cart {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @unique @db.Uuid
+  restaurantId String?  @db.Uuid
+  updatedAt    DateTime @updatedAt
+
+  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CartItem[]
+}
+
+model CartItem {
+  id         String @id @default(uuid()) @db.Uuid
+  cartId     String @db.Uuid
+  menuItemId String @db.Uuid
+  quantity   Int
+
+  cart     Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, menuItemId])
+}
+
+model Order {
+  id               String      @id @default(uuid()) @db.Uuid
+  customerId       String      @db.Uuid
+  restaurantId     String      @db.Uuid
+  addressId        String      @db.Uuid
+  status           OrderStatus @default(PLACED)
+  subtotalCents    Int
+  deliveryFeeCents Int
+  totalCents       Int
+  idempotencyKey   String
+  placedAt         DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  customer   User                 @relation(fields: [customerId], references: [id])
+  restaurant Restaurant           @relation(fields: [restaurantId], references: [id])
+  address    Address              @relation(fields: [addressId], references: [id])
+  items      OrderItem[]
+  history    OrderStatusHistory[]
+  payment    Payment?
+  delivery   Delivery?
+
+  @@unique([customerId, idempotencyKey])
+  @@index([customerId, placedAt(sort: Desc)])
+  @@index([restaurantId, status, placedAt(sort: Desc)])
+  @@index([status])
+}
+
+model OrderItem {
+  id                 String @id @default(uuid()) @db.Uuid
+  orderId            String @db.Uuid
+  // Deliberately NOT a foreign key: an order is a historical record and must survive menu edits/deletes.
+  menuItemId         String @db.Uuid
+  nameSnapshot       String
+  priceCentsSnapshot Int
+  quantity           Int
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+model OrderStatusHistory {
+  id         String       @id @default(uuid()) @db.Uuid
+  orderId    String       @db.Uuid
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  changedById String?     @db.Uuid
+  note       String?
+  createdAt  DateTime     @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+}
+
+model Payment {
+  id             String        @id @default(uuid()) @db.Uuid
+  orderId        String        @unique @db.Uuid
+  amountCents    Int
+  status         PaymentStatus @default(PENDING)
+  provider       String        @default("SIMULATED")
+  simulateOutcome String       @default("SUCCESS")
+  attempts       Int           @default(0)
+  failureReason  String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model DeliveryPartnerProfile {
+  userId            String    @id @db.Uuid
+  isAvailable       Boolean   @default(false)
+  vehicleType       String    @default("BIKE")
+  currentLat        Float?
+  currentLng        Float?
+  locationUpdatedAt DateTime?
+  updatedAt         DateTime  @updatedAt
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries Delivery[]
+
+  @@index([isAvailable])
+}
+
+model Delivery {
+  id          String         @id @default(uuid()) @db.Uuid
+  orderId     String         @unique @db.Uuid
+  partnerId   String         @db.Uuid
+  status      DeliveryStatus @default(ASSIGNED)
+  assignedAt  DateTime       @default(now())
+  pickedUpAt  DateTime?
+  deliveredAt DateTime?
+
+  order   Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  partner DeliveryPartnerProfile @relation(fields: [partnerId], references: [userId])
+
+  @@index([partnerId, status])
+}
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  // Event id from the outbox. (userId, eventId) is unique, which makes the consumer idempotent
+  // under RabbitMQ's at-least-once delivery.
+  eventId   String?
+  type      String
+  title     String
+  body      String
+  payload   Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventId])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model OutboxEvent {
+  id            Int       @id @default(autoincrement())
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  createdAt     DateTime  @default(now())
+  publishedAt   DateTime?
+  // partial index "OutboxEvent_unpublished_idx" (WHERE publishedAt IS NULL) is defined in SQL
+}

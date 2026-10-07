@@ -1,0 +1,126 @@
+# One command brings up the whole platform:   docker compose up --build
+#   App:        http://localhost:8080        API: http://localhost:4000
+#   RabbitMQ:   http://localhost:15672       Prometheus: http://localhost:9090      Grafana: http://localhost:3000
+name: quickbite
+
+x-backend-env: &backend-env
+  env_file: .env
+  environment:
+    NODE_ENV: production
+    LOG_LEVEL: info
+    # Inside the compose network, services are reached by service name (overrides the localhost values in .env).
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    REDIS_URL: redis://redis:6379
+    RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672
+    TRUST_PROXY: 1
+    CORS_ORIGIN: http://localhost:8080,http://localhost:5173
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports: ["5672:5672", "15672:15672"]
+    volumes: [rabbitmqdata:/var/lib/rabbitmq]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  # One-shot job: applies migrations, then seeds demo data (idempotent). api/worker wait for it to finish.
+  migrate:
+    build: { context: ./backend, target: production }
+    <<: *backend-env
+    command: ["sh", "-c", "npx tsx scripts/migrate.ts && npx tsx prisma/seed.ts"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    build: { context: ./backend, target: production }
+    <<: *backend-env
+    ports: ["4000:4000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: { context: ./backend, target: production }
+    <<: *backend-env
+    command: ["node", "dist/worker.js"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4001/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped   # the worker exits on RabbitMQ connection loss; Docker restarts it with a fresh connection
+
+  frontend:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [api]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports: ["9090:9090"]
+    depends_on: [api, worker]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  pgdata:
+  redisdata:
+  rabbitmqdata:
+  promdata:
+  grafanadata:
